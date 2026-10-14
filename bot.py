@@ -1,6 +1,7 @@
 """Telegram-бот: присылаешь ссылку — получаешь видео (не выше 720p).
 
-Скачивание идёт через yt-dlp; прокси задаётся переменной YTDLP_PROXY.
+Скачивание идёт через yt-dlp. Прокси из переменной PROXY используется
+и для yt-dlp, и для запросов к Telegram.
 """
 
 import asyncio
@@ -16,7 +17,7 @@ from urllib.parse import urlparse
 from dotenv import load_dotenv
 from telegram import Message, MessageEntity, Update
 from telegram.constants import ChatAction, ChatType
-from telegram.error import TelegramError
+from telegram.error import NetworkError, TelegramError
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -29,7 +30,8 @@ load_dotenv()
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 YTDLP_CMD = os.environ.get("YTDLP_CMD", "yt-dlp")
-YTDLP_PROXY = os.environ.get("YTDLP_PROXY", "")
+# YTDLP_PROXY — старое название переменной, оставлено для совместимости.
+PROXY = os.environ.get("PROXY") or os.environ.get("YTDLP_PROXY", "")
 MAX_HEIGHT = int(os.environ.get("MAX_HEIGHT", "720"))
 # Ограничение Bot API на отправку файлов — 50 МБ. С локальным Bot API
 # сервером (BOT_API_URL) можно поднять до 2000 МБ.
@@ -174,8 +176,8 @@ async def download(url: str, height: int, workdir: Path) -> Video:
         "-o", str(workdir / "%(id)s.%(ext)s"),
         "--print", "after_move:%(filepath)s\t%(width)s\t%(height)s\t%(duration)s\t%(title)s",
     ]
-    if YTDLP_PROXY:
-        cmd += ["--proxy", YTDLP_PROXY]
+    if PROXY:
+        cmd += ["--proxy", PROXY]
     cmd.append(url)
     log.info("Running: %s", " ".join(cmd))
     proc = await asyncio.create_subprocess_exec(
@@ -349,6 +351,7 @@ def main() -> None:
         Application.builder()
         .token(BOT_TOKEN)
         .concurrent_updates(True)
+        .connect_timeout(30)
         .read_timeout(60)
         .write_timeout(600)
         .media_write_timeout(600)
@@ -359,16 +362,26 @@ def main() -> None:
             .base_file_url(f"{BOT_API_URL.rstrip('/')}/file/bot")
             .local_mode(True)
         )
+    elif PROXY:
+        # С локальным Bot API сервером прокси не нужен: в Telegram ходит сам сервер.
+        builder = builder.proxy(PROXY).get_updates_proxy(PROXY)
     app = builder.build()
     app.add_handler(CommandHandler(["start", "help"], start))
     app.add_handler(MessageHandler(filters.TEXT | filters.CAPTION, handle_message))
     app.add_handler(MessageHandler(~filters.COMMAND & ~filters.StatusUpdate.ALL, handle_other))
     app.add_error_handler(on_error)
     log.info(
-        "Bot started (yt-dlp: %s, proxy: %s, max %dp, limit %d MB)",
-        YTDLP_CMD, YTDLP_PROXY or "none", MAX_HEIGHT, MAX_FILE_MB,
+        "Starting bot (yt-dlp: %s, proxy: %s, max %dp, limit %d MB)",
+        YTDLP_CMD, PROXY or "none", MAX_HEIGHT, MAX_FILE_MB,
     )
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    try:
+        app.run_polling(allowed_updates=Update.ALL_TYPES)
+    except NetworkError as e:
+        # Без подробного traceback: контейнер перезапустится и попробует снова.
+        where = BOT_API_URL or "api.telegram.org"
+        via = f" через прокси {PROXY}" if PROXY and not BOT_API_URL else ""
+        log.error("Не удалось подключиться к %s%s: %s. Проверь сеть и PROXY.", where, via, e)
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

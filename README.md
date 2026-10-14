@@ -1,18 +1,18 @@
 # video-downloader
 
 Telegram-бот: присылаешь ссылку — бот отвечает видеофайлом (не выше 720p).
-Скачивает через yt-dlp (через прокси из `YTDLP_PROXY`), так что
+Скачивает через yt-dlp, так что
 поддерживаются все сайты, которые умеет yt-dlp.
 
 ## Запуск в Docker
 
 Нужны Docker и Docker Compose. Всё остальное есть внутри образа:
 yt-dlp, ffmpeg и deno (yt-dlp нужен JS-рантайм для YouTube). Если задан
-`YTDLP_PROXY`, бот вызывает `yt-dlp --proxy "$YTDLP_PROXY"`.
+`PROXY`, через него идут и скачивание (`yt-dlp --proxy`), и запросы к Telegram.
 
 ```bash
 git clone <repo> video-downloader && cd video-downloader
-cp .env.example .env    # вписать BOT_TOKEN от @BotFather и YTDLP_PROXY
+cp .env.example .env    # вписать BOT_TOKEN от @BotFather и PROXY
 docker compose up -d --build
 ```
 
@@ -31,8 +31,8 @@ docker compose build --no-cache && docker compose up -d   # обновить yt-
 ### Прокси на этом же компьютере
 
 Внутри контейнера `127.0.0.1` указывает на сам контейнер, а не на твой
-компьютер. Поэтому в `YTDLP_PROXY` вместо `127.0.0.1` пиши
-`host.docker.internal`, например `socks5://host.docker.internal:1080`.
+компьютер. Поэтому в `PROXY` вместо `127.0.0.1` пиши
+`host.docker.internal`, например `http://host.docker.internal:3128`.
 Прокси должен принимать подключения не только с `127.0.0.1`: укажи в его
 настройках адрес `0.0.0.0` или адрес моста Docker.
 
@@ -43,7 +43,7 @@ docker compose build --no-cache && docker compose up -d   # обновить yt-
 
 1. Бот находит в сообщении все ссылки, в том числе без `https://`
    (`youtube.com/…`) и ссылки, спрятанные под текстом.
-2. Для каждой запускает `yt-dlp` (с `--proxy`, если задан `YTDLP_PROXY`) с выбором формата не выше 720p
+2. Для каждой запускает `yt-dlp` (с `--proxy`, если задан `PROXY`) с выбором формата не выше 720p
    (предпочитая h264/mp4, который Telegram воспроизводит прямо в чате).
 3. Если файл больше лимита Telegram (50 МБ), качает заново в 480p, 360p, 240p.
 4. Отправляет видео ответом на сообщение и удаляет временные файлы.
@@ -59,7 +59,7 @@ docker compose build --no-cache && docker compose up -d   # обновить yt-
 |--------------------|----------------|----------|
 | `BOT_TOKEN`        | —              | Токен бота (обязательно) |
 | `ALLOWED_USERS`    | пусто (все)    | Telegram id через запятую, кому разрешено пользоваться ботом |
-| `YTDLP_PROXY`      | пусто          | Прокси для yt-dlp (`socks5://…`, `http://…`). Пусто — без прокси |
+| `PROXY`            | пусто          | Прокси для yt-dlp и Telegram (`http://…`, `socks5://…`). Пусто — без прокси. Старое имя `YTDLP_PROXY` тоже работает |
 | `MAX_HEIGHT`       | `720`          | Максимальная высота видео |
 | `MAX_FILE_MB`      | `50`           | Лимит размера файла |
 | `BOT_API_URL`      | пусто          | Локальный [telegram-bot-api](https://github.com/tdlib/telegram-bot-api), например `http://host.docker.internal:8081` — тогда можно поднять `MAX_FILE_MB` до 2000 |
