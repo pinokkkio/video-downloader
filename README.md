@@ -4,6 +4,23 @@ Telegram-бот: присылаешь ссылку — бот отвечает �
 Скачивает через yt-dlp, так что
 поддерживаются все сайты, которые умеет yt-dlp.
 
+С Telegram бот работает напрямую по протоколу MTProto (библиотека
+[Telethon](https://github.com/LonamiWebs/Telethon)), а не через Bot API,
+поэтому может отправлять видео до 2 ГБ, а не до 50 МБ.
+
+## Ключи `API_ID` и `API_HASH`
+
+Для MTProto кроме токена бота нужны ключи приложения:
+
+1. Зайди на [my.telegram.org](https://my.telegram.org) по номеру телефона
+   (код придёт в Telegram).
+2. Открой **API development tools**, заполни название (любое, например
+   `video-downloader`) и платформу, нажми **Create application**.
+3. Скопируй `App api_id` и `App api_hash` в `.env`.
+
+Это ключи приложения, а не доступ к аккаунту: бот входит по `BOT_TOKEN`.
+Но публиковать их не стоит.
+
 ## Запуск в Docker
 
 Нужны Docker и Docker Compose. Всё остальное есть внутри образа:
@@ -12,7 +29,7 @@ yt-dlp, ffmpeg и deno (yt-dlp нужен JS-рантайм для YouTube). Е�
 
 ```bash
 git clone <repo> video-downloader && cd video-downloader
-cp .env.example .env    # вписать BOT_TOKEN от @BotFather и PROXY
+cp .env.example .env    # вписать BOT_TOKEN, API_ID, API_HASH и PROXY
 docker compose up -d --build
 ```
 
@@ -27,6 +44,10 @@ docker compose build --no-cache && docker compose up -d   # обновить yt-
 
 Если сайт перестал скачиваться, сначала обнови yt-dlp последней командой:
 при каждой сборке ставится свежая версия.
+
+Сессия Telethon хранится в томе `session`, поэтому после перезапуска бот
+не авторизуется заново. Если сменил `BOT_TOKEN`, удали том:
+`docker compose down -v`.
 
 ### Прокси на этом же компьютере
 
@@ -45,8 +66,9 @@ docker compose build --no-cache && docker compose up -d   # обновить yt-
    (`youtube.com/…`) и ссылки, спрятанные под текстом.
 2. Для каждой запускает `yt-dlp` (с `--proxy`, если задан `PROXY`) с выбором формата не выше 720p
    (предпочитая h264/mp4, который Telegram воспроизводит прямо в чате).
-3. Если файл больше лимита Telegram (50 МБ), качает заново в 480p, 360p, 240p.
-4. Отправляет видео ответом на сообщение и удаляет временные файлы.
+3. Если файл больше лимита (`MAX_FILE_MB`, по умолчанию 2000 МБ), качает заново в 480p, 360p, 240p.
+4. Отправляет видео с превью ответом на сообщение (в статусе виден процент
+   загрузки) и удаляет временные файлы.
 
 Если что-то пошло не так, бот отвечает на сообщение пользователя понятной
 ошибкой: в сообщении нет ссылки, ссылку не удалось распознать, сайт не
@@ -58,12 +80,12 @@ docker compose build --no-cache && docker compose up -d   # обновить yt-
 | Переменная         | По умолчанию   | Описание |
 |--------------------|----------------|----------|
 | `BOT_TOKEN`        | —              | Токен бота (обязательно) |
+| `API_ID`, `API_HASH` | —            | Ключи приложения с my.telegram.org (обязательно) |
 | `ALLOWED_USERS`    | пусто (все)    | Telegram id через запятую, кому разрешено пользоваться ботом |
 | `PROXY`            | пусто          | Прокси для yt-dlp и Telegram (`http://…`, `socks5://…`). Пусто — без прокси. Старое имя `YTDLP_PROXY` тоже работает |
 | `MAX_HEIGHT`       | `720`          | Максимальная высота видео |
-| `MAX_FILE_MB`      | `50`           | Лимит размера файла |
-| `BOT_API_URL`      | пусто          | Локальный [telegram-bot-api](https://github.com/tdlib/telegram-bot-api), например `http://host.docker.internal:8081` — тогда можно поднять `MAX_FILE_MB` до 2000 |
-| `DOWNLOAD_TIMEOUT` | `600`          | Таймаут скачивания, сек. |
+| `MAX_FILE_MB`      | `2000`         | Лимит размера файла (Telegram принимает до 2000 МБ) |
+| `DOWNLOAD_TIMEOUT` | `1800`         | Таймаут скачивания, сек. |
 | `MAX_PARALLEL`     | `2`            | Сколько видео качать одновременно |
 
 Свой Telegram id можно узнать у [@userinfobot](https://t.me/userinfobot).

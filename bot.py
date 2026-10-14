@@ -1,7 +1,8 @@
 """Telegram-бот: присылаешь ссылку — получаешь видео (не выше 720p).
 
-Скачивание идёт через yt-dlp. Прокси из переменной PROXY используется
-и для yt-dlp, и для запросов к Telegram.
+Скачивание идёт через yt-dlp. С Telegram бот работает напрямую по MTProto
+(Telethon), поэтому может отправлять файлы до 2 ГБ, а не 50 МБ, как через
+Bot API. Прокси из переменной PROXY используется и для yt-dlp, и для Telegram.
 """
 
 import asyncio
@@ -10,34 +11,35 @@ import os
 import re
 import shutil
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 from dotenv import load_dotenv
-from telegram import Message, MessageEntity, Update
-from telegram.constants import ChatAction, ChatType
-from telegram.error import NetworkError, TelegramError
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    ContextTypes,
-    MessageHandler,
-    filters,
+from telethon import TelegramClient, events
+from telethon.errors import RPCError
+from telethon.tl.custom import Message
+from telethon.tl.types import (
+    DocumentAttributeVideo,
+    MessageEntityTextUrl,
+    MessageEntityUrl,
 )
 
 load_dotenv()
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
+API_ID = int(os.environ.get("API_ID") or 0)
+API_HASH = os.environ.get("API_HASH", "")
+# Файл сессии Telethon (без расширения). В Docker лежит в томе data/.
+SESSION = os.environ.get("SESSION", "data/bot")
 YTDLP_CMD = os.environ.get("YTDLP_CMD", "yt-dlp")
 # YTDLP_PROXY — старое название переменной, оставлено для совместимости.
 PROXY = os.environ.get("PROXY") or os.environ.get("YTDLP_PROXY", "")
 MAX_HEIGHT = int(os.environ.get("MAX_HEIGHT", "720"))
-# Ограничение Bot API на отправку файлов — 50 МБ. С локальным Bot API
-# сервером (BOT_API_URL) можно поднять до 2000 МБ.
-MAX_FILE_MB = int(os.environ.get("MAX_FILE_MB", "50"))
-BOT_API_URL = os.environ.get("BOT_API_URL", "")
-DOWNLOAD_TIMEOUT = int(os.environ.get("DOWNLOAD_TIMEOUT", "600"))
+# Боты по MTProto могут отправлять файлы до 2000 МБ.
+MAX_FILE_MB = int(os.environ.get("MAX_FILE_MB", "2000"))
+DOWNLOAD_TIMEOUT = int(os.environ.get("DOWNLOAD_TIMEOUT", "1800"))
 MAX_PARALLEL = int(os.environ.get("MAX_PARALLEL", "2"))
 ALLOWED_USERS = {
     int(x) for x in re.split(r"[,\s]+", os.environ.get("ALLOWED_USERS", "")) if x
@@ -72,10 +74,30 @@ YTDLP_ERRORS = [
 logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s: %(message)s", level=logging.INFO
 )
-logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("telethon").setLevel(logging.WARNING)
 log = logging.getLogger("video-bot")
 
 download_slots = asyncio.Semaphore(MAX_PARALLEL)
+START_RE = re.compile(r"^/(start|help)(@\w+)?$", re.I)
+
+
+def parse_proxy(url: str) -> dict | None:
+    """http://user:pass@host:port или socks5://… -> настройки прокси для Telethon."""
+    if not url:
+        return None
+    p = urlparse(url)
+    kinds = {"http": "http", "https": "http", "socks5": "socks5", "socks5h": "socks5",
+             "socks4": "socks4", "socks4a": "socks4"}
+    if p.scheme not in kinds or not p.hostname:
+        raise SystemExit(f"Не понимаю адрес прокси {url!r}: нужен http://host:port или socks5://host:port.")
+    return {
+        "proxy_type": kinds[p.scheme],
+        "addr": p.hostname,
+        "port": p.port or (1080 if p.scheme.startswith("socks") else 8080),
+        "username": unquote(p.username) if p.username else None,
+        "password": unquote(p.password) if p.password else None,
+        "rdns": True,
+    }
 
 
 class DownloadError(Exception):
@@ -135,10 +157,13 @@ def normalize_url(raw: str) -> str | None:
 
 def extract_urls(message: Message) -> tuple[list[str], list[str]]:
     """Возвращает (корректные ссылки, ссылки, которые не удалось разобрать)."""
-    types = [MessageEntity.URL, MessageEntity.TEXT_LINK]
-    entities = message.parse_entities(types) if message.text else message.parse_caption_entities(types)
-    raw = [e.url if e.type == MessageEntity.TEXT_LINK else text for e, text in entities.items()]
-    raw += URL_RE.findall(message.text or message.caption or "")
+    raw = []
+    for entity, text in message.get_entities_text():
+        if isinstance(entity, MessageEntityTextUrl):
+            raw.append(entity.url)
+        elif isinstance(entity, MessageEntityUrl):
+            raw.append(text)
+    raw += URL_RE.findall(message.message or "")
 
     good, bad = [], []
     for item in raw:
@@ -149,11 +174,6 @@ def extract_urls(message: Message) -> tuple[list[str], list[str]]:
         elif url not in good:
             good.append(url)
     return good, bad
-
-
-async def reply(message: Message, text: str) -> Message:
-    """Ответ именно на сообщение пользователя (с цитатой и в личке тоже)."""
-    return await message.reply_text(text, do_quote=True, disable_web_page_preview=True)
 
 
 def _int(value: str) -> int | None:
@@ -228,19 +248,76 @@ async def probe(video: Video) -> None:
     video.duration = video.duration or _int(info.get("duration", ""))
 
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await reply(
-        update.effective_message,
-        f"Пришли ссылку на видео — я скачаю его и пришлю обратно "
-        f"(качество не выше {MAX_HEIGHT}p)."
+async def make_thumb(video: Video) -> Path | None:
+    """Кадр для превью: без него Telegram показывает видео с чёрной заглушкой."""
+    thumb = video.path.with_suffix(".jpg")
+    at = min(1.0, (video.duration or 0) / 2)
+    proc = await asyncio.create_subprocess_exec(
+        "ffmpeg", "-y", "-loglevel", "error", "-ss", str(at), "-i", str(video.path),
+        "-frames:v", "1", "-vf", "scale='min(320,iw)':-2", str(thumb),
+        stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
     )
+    await proc.wait()
+    return thumb if proc.returncode == 0 and thumb.exists() else None
 
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    message = update.effective_message
-    user = update.effective_user
-    if ALLOWED_USERS and (user is None or user.id not in ALLOWED_USERS):
-        log.info("Rejected user %s", user.id if user else None)
+async def reply(message: Message, text: str) -> Message:
+    """Ответ именно на сообщение пользователя (с цитатой)."""
+    return await message.reply(text, link_preview=False)
+
+
+async def delete_quietly(message: Message) -> None:
+    try:
+        await message.delete()
+    except RPCError:
+        pass
+
+
+async def edit_quietly(message: Message, text: str) -> None:
+    try:
+        await message.edit(text, link_preview=False)
+    except RPCError:
+        pass
+
+
+async def fail(message: Message, status: Message, text: str) -> None:
+    """Убирает статус и отвечает об ошибке на исходное сообщение пользователя."""
+    await delete_quietly(status)
+    try:
+        await reply(message, text)
+    except RPCError:
+        log.exception("Failed to report error to user")
+
+
+async def on_message(event: events.NewMessage.Event) -> None:
+    message: Message = event.message
+    if ALLOWED_USERS and event.sender_id not in ALLOWED_USERS:
+        log.info("Rejected user %s", event.sender_id)
+        return
+    try:
+        await handle_message(event, message)
+    except Exception:
+        log.exception("Unhandled error")
+        try:
+            await reply(message, "❌ Что-то пошло не так, попробуй ещё раз.")
+        except RPCError:
+            log.exception("Failed to report error to user")
+
+
+async def handle_message(event: events.NewMessage.Event, message: Message) -> None:
+    text = message.message or ""
+    if START_RE.match(text.strip()):
+        await reply(
+            message,
+            f"Пришли ссылку на видео — я скачаю его и пришлю обратно "
+            f"(качество не выше {MAX_HEIGHT}p).",
+        )
+        return
+
+    if not text:
+        # Стикеры, фото без подписи и т.п. — подсказываем только в личке.
+        if event.is_private:
+            await reply(message, "❌ Я понимаю только ссылки. Пришли ссылку на видео.")
         return
 
     urls, bad = extract_urls(message)
@@ -256,66 +333,68 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     for url in urls:
-        await process_url(update, context, url)
+        await process_url(event.client, message, url)
 
 
-async def handle_other(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Стикеры, фото без подписи и т.п. — подсказываем, что нужна ссылка."""
-    if update.effective_chat and update.effective_chat.type == ChatType.PRIVATE:
-        await reply(update.effective_message, "❌ Я понимаю только ссылки. Пришли ссылку на видео.")
-
-
-async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-    log.error("Unhandled error", exc_info=context.error)
-    if isinstance(update, Update) and update.effective_message:
-        try:
-            await reply(update.effective_message, "❌ Что-то пошло не так, попробуй ещё раз.")
-        except TelegramError:
-            log.exception("Failed to report error to user")
-
-
-async def process_url(update: Update, context: ContextTypes.DEFAULT_TYPE, url: str) -> None:
-    message = update.effective_message
+async def process_url(client: TelegramClient, message: Message, url: str) -> None:
     status = await reply(message, f"⏳ Скачиваю {url}")
     workdir = Path(tempfile.mkdtemp(prefix="tgvideo-"))
     limit = MAX_FILE_MB * 1024 * 1024
     try:
         async with download_slots:
             video = None
-            for height in FALLBACK_HEIGHTS:
-                await context.bot.send_chat_action(message.chat_id, ChatAction.RECORD_VIDEO)
-                video = await download(url, height, workdir)
-                size = video.path.stat().st_size
-                log.info("Downloaded %s (%dp max): %.1f MB", url, height, size / 2**20)
-                if size <= limit:
-                    break
-                video.path.unlink(missing_ok=True)
-                video = None
-                await status.edit_text(
-                    f"⏳ В {height}p файл больше {MAX_FILE_MB} МБ, пробую качество пониже…"
-                )
+            async with client.action(message.chat_id, "record-video"):
+                for height in FALLBACK_HEIGHTS:
+                    video = await download(url, height, workdir)
+                    size = video.path.stat().st_size
+                    log.info("Downloaded %s (%dp max): %.1f MB", url, height, size / 2**20)
+                    if size <= limit:
+                        break
+                    video.path.unlink(missing_ok=True)
+                    video = None
+                    await edit_quietly(
+                        status, f"⏳ В {height}p файл больше {MAX_FILE_MB} МБ, пробую качество пониже…"
+                    )
             if video is None:
                 raise DownloadError(
                     f"Видео слишком большое: даже в низком качестве больше {MAX_FILE_MB} МБ."
                 )
 
-            await status.edit_text("📤 Отправляю…")
-            await context.bot.send_chat_action(message.chat_id, ChatAction.UPLOAD_VIDEO)
-            with video.path.open("rb") as f:
-                await message.reply_video(
-                    video=f,
+            size_mb = video.path.stat().st_size / 2**20
+            await edit_quietly(status, f"📤 Отправляю ({size_mb:.0f} МБ)…")
+            last_edit = time.monotonic()
+
+            async def progress(sent: int, total: int) -> None:
+                nonlocal last_edit
+                if time.monotonic() - last_edit >= 5:
+                    last_edit = time.monotonic()
+                    await edit_quietly(
+                        status, f"📤 Отправляю ({size_mb:.0f} МБ): {sent * 100 // total}%"
+                    )
+
+            thumb = await make_thumb(video)
+            async with client.action(message.chat_id, "video"):
+                await client.send_file(
+                    message.chat_id,
+                    str(video.path),
                     caption=video.title[:1024] or None,
-                    width=video.width,
-                    height=video.height,
-                    duration=video.duration,
+                    reply_to=message.id,
+                    thumb=str(thumb) if thumb else None,
                     supports_streaming=True,
-                    read_timeout=600,
-                    write_timeout=600,
+                    attributes=[
+                        DocumentAttributeVideo(
+                            duration=video.duration or 0,
+                            w=video.width or 0,
+                            h=video.height or 0,
+                            supports_streaming=True,
+                        )
+                    ],
+                    progress_callback=progress,
                 )
         await delete_quietly(status)
     except DownloadError as e:
         await fail(message, status, f"❌ {e}\n{url}")
-    except TelegramError as e:
+    except RPCError as e:
         log.exception("Telegram error while processing %s", url)
         await fail(message, status, f"❌ Не удалось отправить видео: {e.message}\n{url}")
     except Exception:
@@ -325,63 +404,43 @@ async def process_url(update: Update, context: ContextTypes.DEFAULT_TYPE, url: s
         shutil.rmtree(workdir, ignore_errors=True)
 
 
-async def delete_quietly(message: Message) -> None:
-    try:
-        await message.delete()
-    except TelegramError:
-        pass
+async def run() -> None:
+    proxy = parse_proxy(PROXY)
+    Path(SESSION).parent.mkdir(parents=True, exist_ok=True)
+    client = TelegramClient(SESSION, API_ID, API_HASH, proxy=proxy, connection_retries=3)
+    client.add_event_handler(on_message, events.NewMessage(incoming=True))
 
-
-async def fail(message: Message, status: Message, text: str) -> None:
-    """Убирает статус и отвечает об ошибке на исходное сообщение пользователя."""
-    await delete_quietly(status)
-    try:
-        await reply(message, text)
-    except TelegramError:
-        log.exception("Failed to report error to user")
-
-
-def main() -> None:
-    if not BOT_TOKEN:
-        raise SystemExit("Задай BOT_TOKEN (в окружении или в файле .env).")
-    if shutil.which(YTDLP_CMD) is None:
-        raise SystemExit(f"Команда {YTDLP_CMD!r} не найдена в PATH.")
-
-    builder = (
-        Application.builder()
-        .token(BOT_TOKEN)
-        .concurrent_updates(True)
-        .connect_timeout(30)
-        .read_timeout(60)
-        .write_timeout(600)
-        .media_write_timeout(600)
-    )
-    if BOT_API_URL:
-        builder = (
-            builder.base_url(f"{BOT_API_URL.rstrip('/')}/bot")
-            .base_file_url(f"{BOT_API_URL.rstrip('/')}/file/bot")
-            .local_mode(True)
-        )
-    elif PROXY:
-        # С локальным Bot API сервером прокси не нужен: в Telegram ходит сам сервер.
-        builder = builder.proxy(PROXY).get_updates_proxy(PROXY)
-    app = builder.build()
-    app.add_handler(CommandHandler(["start", "help"], start))
-    app.add_handler(MessageHandler(filters.TEXT | filters.CAPTION, handle_message))
-    app.add_handler(MessageHandler(~filters.COMMAND & ~filters.StatusUpdate.ALL, handle_other))
-    app.add_error_handler(on_error)
     log.info(
         "Starting bot (yt-dlp: %s, proxy: %s, max %dp, limit %d MB)",
         YTDLP_CMD, PROXY or "none", MAX_HEIGHT, MAX_FILE_MB,
     )
     try:
-        app.run_polling(allowed_updates=Update.ALL_TYPES)
-    except NetworkError as e:
+        await client.start(bot_token=BOT_TOKEN)
+    except (OSError, ConnectionError) as e:
         # Без подробного traceback: контейнер перезапустится и попробует снова.
-        where = BOT_API_URL or "api.telegram.org"
-        via = f" через прокси {PROXY}" if PROXY and not BOT_API_URL else ""
-        log.error("Не удалось подключиться к %s%s: %s. Проверь сеть и PROXY.", where, via, e)
+        via = f" через прокси {PROXY}" if PROXY else ""
+        log.error("Не удалось подключиться к Telegram%s: %s. Проверь сеть и PROXY.", via, e)
         raise SystemExit(1)
+    except RPCError as e:
+        log.error("Telegram отклонил вход: %s. Проверь BOT_TOKEN, API_ID и API_HASH.", e)
+        raise SystemExit(1)
+
+    me = await client.get_me()
+    log.info("Bot @%s is running", me.username)
+    await client.run_until_disconnected()
+
+
+def main() -> None:
+    if not BOT_TOKEN:
+        raise SystemExit("Задай BOT_TOKEN (в окружении или в файле .env).")
+    if not API_ID or not API_HASH:
+        raise SystemExit("Задай API_ID и API_HASH (их выдают на https://my.telegram.org).")
+    if shutil.which(YTDLP_CMD) is None:
+        raise SystemExit(f"Команда {YTDLP_CMD!r} не найдена в PATH.")
+    try:
+        asyncio.run(run())
+    except KeyboardInterrupt:
+        pass
 
 
 if __name__ == "__main__":

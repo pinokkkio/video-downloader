@@ -4,6 +4,11 @@ services:
     env_file: .env
     restart: unless-stopped
     init: true
+    volumes:
+      - session:/app/data
     # Позволяет обращаться к прокси на хосте как host.docker.internal
     extra_hosts:
       - "host.docker.internal:host-gateway"
+
+volumes:
+  session:

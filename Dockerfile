@@ -14,7 +14,8 @@ RUN pip install --no-cache-dir -r requirements.txt "yt-dlp[default]"
 
 COPY bot.py .
 
-RUN useradd --create-home bot
+# data/ — файл сессии Telethon, монтируется как том
+RUN useradd --create-home bot && mkdir -p /app/data && chown bot:bot /app/data
 USER bot
 
 CMD ["python", "bot.py"]
