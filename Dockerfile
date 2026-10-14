@@ -12,7 +12,6 @@ COPY requirements.txt .
 # docker compose build --no-cache
 RUN pip install --no-cache-dir -r requirements.txt "yt-dlp[default]"
 
-COPY docker/yt-dlp-proxy /usr/local/bin/yt-dlp-proxy
 COPY bot.py .
 
 RUN useradd --create-home bot

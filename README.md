@@ -1,14 +1,14 @@
 # video-downloader
 
 Telegram-бот: присылаешь ссылку — бот отвечает видеофайлом (не выше 720p).
-Скачивает через `yt-dlp-proxy` (yt-dlp с прокси по умолчанию), так что
+Скачивает через yt-dlp (через прокси из `YTDLP_PROXY`), так что
 поддерживаются все сайты, которые умеет yt-dlp.
 
 ## Запуск в Docker
 
 Нужны Docker и Docker Compose. Всё остальное есть внутри образа:
-yt-dlp, ffmpeg, deno (yt-dlp нужен JS-рантайм для YouTube) и
-обёртка `yt-dlp-proxy`, которая вызывает `yt-dlp --proxy "$YTDLP_PROXY"`.
+yt-dlp, ffmpeg и deno (yt-dlp нужен JS-рантайм для YouTube). Если задан
+`YTDLP_PROXY`, бот вызывает `yt-dlp --proxy "$YTDLP_PROXY"`.
 
 ```bash
 git clone <repo> video-downloader && cd video-downloader
@@ -42,7 +42,7 @@ docker compose build --no-cache && docker compose up -d   # обновить yt-
 ## Как работает
 
 1. Бот находит в сообщении все ссылки `http(s)://…`.
-2. Для каждой запускает `yt-dlp-proxy` с выбором формата не выше 720p
+2. Для каждой запускает `yt-dlp` (с `--proxy`, если задан `YTDLP_PROXY`) с выбором формата не выше 720p
    (предпочитая h264/mp4, который Telegram воспроизводит прямо в чате).
 3. Если файл больше лимита Telegram (50 МБ), качает заново в 480p, 360p, 240p.
 4. Отправляет видео ответом на сообщение и удаляет временные файлы.
@@ -53,7 +53,7 @@ docker compose build --no-cache && docker compose up -d   # обновить yt-
 |--------------------|----------------|----------|
 | `BOT_TOKEN`        | —              | Токен бота (обязательно) |
 | `ALLOWED_USERS`    | пусто (все)    | Telegram id через запятую, кому разрешено пользоваться ботом |
-| `YTDLP_PROXY`      | пусто          | Прокси для yt-dlp (`socks5://…`, `http://…`) |
+| `YTDLP_PROXY`      | пусто          | Прокси для yt-dlp (`socks5://…`, `http://…`). Пусто — без прокси |
 | `MAX_HEIGHT`       | `720`          | Максимальная высота видео |
 | `MAX_FILE_MB`      | `50`           | Лимит размера файла |
 | `BOT_API_URL`      | пусто          | Локальный [telegram-bot-api](https://github.com/tdlib/telegram-bot-api), например `http://host.docker.internal:8081` — тогда можно поднять `MAX_FILE_MB` до 2000 |

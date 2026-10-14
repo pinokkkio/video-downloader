@@ -1,6 +1,6 @@
 """Telegram-бот: присылаешь ссылку — получаешь видео (не выше 720p).
 
-Скачивание идёт через `yt-dlp-proxy` (yt-dlp с прокси по умолчанию).
+Скачивание идёт через yt-dlp; прокси задаётся переменной YTDLP_PROXY.
 """
 
 import asyncio
@@ -26,7 +26,8 @@ from telegram.ext import (
 load_dotenv()
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
-YTDLP_CMD = os.environ.get("YTDLP_CMD", "yt-dlp-proxy")
+YTDLP_CMD = os.environ.get("YTDLP_CMD", "yt-dlp")
+YTDLP_PROXY = os.environ.get("YTDLP_PROXY", "")
 MAX_HEIGHT = int(os.environ.get("MAX_HEIGHT", "720"))
 # Ограничение Bot API на отправку файлов — 50 МБ. С локальным Bot API
 # сервером (BOT_API_URL) можно поднять до 2000 МБ.
@@ -98,8 +99,10 @@ async def download(url: str, height: int, workdir: Path) -> Video:
         "--remux-video", "mp4",
         "-o", str(workdir / "%(id)s.%(ext)s"),
         "--print", "after_move:%(filepath)s\t%(width)s\t%(height)s\t%(duration)s\t%(title)s",
-        url,
     ]
+    if YTDLP_PROXY:
+        cmd += ["--proxy", YTDLP_PROXY]
+    cmd.append(url)
     log.info("Running: %s", " ".join(cmd))
     proc = await asyncio.create_subprocess_exec(
         *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
@@ -244,7 +247,10 @@ def main() -> None:
     app = builder.build()
     app.add_handler(CommandHandler(["start", "help"], start))
     app.add_handler(MessageHandler(filters.TEXT | filters.CAPTION, handle_message))
-    log.info("Bot started (yt-dlp: %s, max %dp, limit %d MB)", YTDLP_CMD, MAX_HEIGHT, MAX_FILE_MB)
+    log.info(
+        "Bot started (yt-dlp: %s, proxy: %s, max %dp, limit %d MB)",
+        YTDLP_CMD, YTDLP_PROXY or "none", MAX_HEIGHT, MAX_FILE_MB,
+    )
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
