@@ -4,48 +4,40 @@ Telegram-бот: присылаешь ссылку — бот отвечает �
 Скачивает через `yt-dlp-proxy` (yt-dlp с прокси по умолчанию), так что
 поддерживаются все сайты, которые умеет yt-dlp.
 
-## Требования
+## Запуск в Docker
 
-- Python 3.10+
-- `yt-dlp-proxy` в `PATH`
-- `ffmpeg` (нужен yt-dlp, чтобы склеить видео и звук в mp4)
-
-## Установка
+Нужны Docker и Docker Compose. Всё остальное есть внутри образа:
+yt-dlp, ffmpeg, deno (yt-dlp нужен JS-рантайм для YouTube) и
+обёртка `yt-dlp-proxy`, которая вызывает `yt-dlp --proxy "$YTDLP_PROXY"`.
 
 ```bash
-git clone <repo> ~/video-downloader && cd ~/video-downloader
-python3 -m venv .venv
-.venv/bin/pip install -r requirements.txt
-cp .env.example .env   # и вписать BOT_TOKEN от @BotFather
+git clone <repo> video-downloader && cd video-downloader
+cp .env.example .env    # вписать BOT_TOKEN от @BotFather и YTDLP_PROXY
+docker compose up -d --build
 ```
 
-Проверить в терминале:
+Контейнер запускается в фоне и сам поднимается после перезагрузки
+(`restart: unless-stopped`, если служба Docker включена при старте системы).
 
 ```bash
-.venv/bin/python bot.py
+docker compose logs -f                  # логи
+docker compose down                     # остановить
+docker compose build --no-cache && docker compose up -d   # обновить yt-dlp
 ```
 
-## Фоновый запуск
+Если сайт перестал скачиваться, сначала обнови yt-dlp последней командой:
+при каждой сборке ставится свежая версия.
 
-### Linux (systemd)
+### Прокси на этом же компьютере
 
-```bash
-mkdir -p ~/.config/systemd/user
-cp video-bot.service ~/.config/systemd/user/
-# если проект лежит не в ~/video-downloader или yt-dlp-proxy в другом месте —
-# поправь WorkingDirectory/ExecStart/PATH в скопированном файле
-systemctl --user daemon-reload
-systemctl --user enable --now video-bot
-loginctl enable-linger "$USER"   # чтобы бот работал без открытой сессии
+Внутри контейнера `127.0.0.1` указывает на сам контейнер, а не на твой
+компьютер. Поэтому в `YTDLP_PROXY` вместо `127.0.0.1` пиши
+`host.docker.internal`, например `socks5://host.docker.internal:1080`.
+Прокси должен принимать подключения не только с `127.0.0.1`: укажи в его
+настройках адрес `0.0.0.0` или адрес моста Docker.
 
-journalctl --user -u video-bot -f   # логи
-```
-
-### Без systemd (Linux/macOS)
-
-```bash
-nohup .venv/bin/python bot.py >> bot.log 2>&1 &
-```
+Другой способ, только для Linux: добавить в `compose.yaml` сервису
+`network_mode: host`, убрав `extra_hosts`. Тогда подойдёт и `127.0.0.1`.
 
 ## Как работает
 
@@ -61,10 +53,10 @@ nohup .venv/bin/python bot.py >> bot.log 2>&1 &
 |--------------------|----------------|----------|
 | `BOT_TOKEN`        | —              | Токен бота (обязательно) |
 | `ALLOWED_USERS`    | пусто (все)    | Telegram id через запятую, кому разрешено пользоваться ботом |
-| `YTDLP_CMD`        | `yt-dlp-proxy` | Команда для скачивания |
+| `YTDLP_PROXY`      | пусто          | Прокси для yt-dlp (`socks5://…`, `http://…`) |
 | `MAX_HEIGHT`       | `720`          | Максимальная высота видео |
 | `MAX_FILE_MB`      | `50`           | Лимит размера файла |
-| `BOT_API_URL`      | пусто          | Локальный [telegram-bot-api](https://github.com/tdlib/telegram-bot-api), например `http://localhost:8081` — тогда можно поднять `MAX_FILE_MB` до 2000 |
+| `BOT_API_URL`      | пусто          | Локальный [telegram-bot-api](https://github.com/tdlib/telegram-bot-api), например `http://host.docker.internal:8081` — тогда можно поднять `MAX_FILE_MB` до 2000 |
 | `DOWNLOAD_TIMEOUT` | `600`          | Таймаут скачивания, сек. |
 | `MAX_PARALLEL`     | `2`            | Сколько видео качать одновременно |
 

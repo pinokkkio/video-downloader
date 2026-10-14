@@ -1,0 +1,6 @@
+#!/bin/sh
+# yt-dlp с прокси по умолчанию. Прокси задаётся переменной YTDLP_PROXY.
+if [ -n "$YTDLP_PROXY" ]; then
+    exec yt-dlp --proxy "$YTDLP_PROXY" "$@"
+fi
+exec yt-dlp "$@"
