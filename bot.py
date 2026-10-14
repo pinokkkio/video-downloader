@@ -19,6 +19,7 @@ from urllib.parse import unquote, urlparse
 from dotenv import load_dotenv
 from telethon import TelegramClient, events
 from telethon.errors import RPCError
+from telethon.network import ConnectionTcpObfuscated
 from telethon.tl.custom import Message
 from telethon.tl.types import (
     DocumentAttributeVideo,
@@ -79,6 +80,16 @@ log = logging.getLogger("video-bot")
 
 download_slots = asyncio.Semaphore(MAX_PARALLEL)
 START_RE = re.compile(r"^/(start|help)(@\w+)?$", re.I)
+
+
+def mask_proxy(url: str) -> str:
+    """Адрес прокси для логов — без пароля."""
+    if not url:
+        return "нет (прямое подключение)"
+    p = urlparse(url)
+    if p.password:
+        url = url.replace(f":{p.password}@", ":***@", 1)
+    return url
 
 
 def parse_proxy(url: str) -> dict | None:
@@ -199,7 +210,7 @@ async def download(url: str, height: int, workdir: Path) -> Video:
     if PROXY:
         cmd += ["--proxy", PROXY]
     cmd.append(url)
-    log.info("Running: %s", " ".join(cmd))
+    log.info("Running: %s", " ".join(cmd).replace(PROXY, mask_proxy(PROXY)) if PROXY else " ".join(cmd))
     proc = await asyncio.create_subprocess_exec(
         *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
     )
@@ -407,18 +418,23 @@ async def process_url(client: TelegramClient, message: Message, url: str) -> Non
 async def run() -> None:
     proxy = parse_proxy(PROXY)
     Path(SESSION).parent.mkdir(parents=True, exist_ok=True)
-    client = TelegramClient(SESSION, API_ID, API_HASH, proxy=proxy, connection_retries=3)
+    # Обфусцированный транспорт: обычный MTProto легко распознаётся DPI
+    # и соединение сбрасывается (Connection reset by peer).
+    client = TelegramClient(
+        SESSION, API_ID, API_HASH,
+        proxy=proxy, connection=ConnectionTcpObfuscated, connection_retries=3,
+    )
     client.add_event_handler(on_message, events.NewMessage(incoming=True))
 
     log.info(
         "Starting bot (yt-dlp: %s, proxy: %s, max %dp, limit %d MB)",
-        YTDLP_CMD, PROXY or "none", MAX_HEIGHT, MAX_FILE_MB,
+        YTDLP_CMD, mask_proxy(PROXY), MAX_HEIGHT, MAX_FILE_MB,
     )
     try:
         await client.start(bot_token=BOT_TOKEN)
     except (OSError, ConnectionError) as e:
         # Без подробного traceback: контейнер перезапустится и попробует снова.
-        via = f" через прокси {PROXY}" if PROXY else ""
+        via = f" через прокси {mask_proxy(PROXY)}" if PROXY else " напрямую (PROXY не задан)"
         log.error("Не удалось подключиться к Telegram%s: %s. Проверь сеть и PROXY.", via, e)
         raise SystemExit(1)
     except RPCError as e:
