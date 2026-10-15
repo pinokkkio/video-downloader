@@ -1,0 +1,15 @@
+# Конфигурация для https://amvera.ru: сборка из Dockerfile.
+# BOT_TOKEN, API_ID и API_HASH задаются в интерфейсе Amvera
+# (раздел «Переменные», лучше как секреты), а не в этом файле.
+meta:
+  environment: docker
+  toolchain:
+    name: docker
+    params: {}
+build:
+  dockerfile: Dockerfile
+  skip: false
+run:
+  # Постоянное хранилище: здесь лежит сессия Telethon
+  persistenceMount: /data
+  containerPort: 80

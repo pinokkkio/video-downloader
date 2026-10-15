@@ -32,7 +32,7 @@ load_dotenv()
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 API_ID = int(os.environ.get("API_ID") or 0)
 API_HASH = os.environ.get("API_HASH", "")
-# Файл сессии Telethon (без расширения). В Docker лежит в томе data/.
+# Файл сессии Telethon (без расширения). В Docker — /data/bot (см. Dockerfile).
 SESSION = os.environ.get("SESSION", "data/bot")
 YTDLP_CMD = os.environ.get("YTDLP_CMD", "yt-dlp")
 MAX_HEIGHT = int(os.environ.get("MAX_HEIGHT", "720"))

@@ -5,7 +5,7 @@ services:
     restart: unless-stopped
     init: true
     volumes:
-      - session:/app/data
+      - session:/data
 
 volumes:
   session:

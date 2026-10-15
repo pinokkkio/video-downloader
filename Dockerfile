@@ -8,14 +8,16 @@ RUN apt-get update \
 
 WORKDIR /app
 COPY requirements.txt .
-# yt-dlp ставится свежий при каждой сборке (сайты часто ломают старые версии):
-# docker compose build --no-cache
+# yt-dlp ставится свежий при каждой сборке (сайты часто ломают старые версии)
 RUN pip install --no-cache-dir -r requirements.txt "yt-dlp[default]"
 
 COPY bot.py .
 
-# data/ — файл сессии Telethon, монтируется как том
-RUN useradd --create-home bot && mkdir -p /app/data && chown bot:bot /app/data
-USER bot
+# Файл сессии Telethon хранится в /data — это постоянное хранилище и на
+# Amvera (persistenceMount), и в docker compose (том session).
+# Процесс работает от root: права на хранилище, которое монтирует хостинг,
+# заранее неизвестны, а пользователю без прав не удастся записать сессию.
+ENV SESSION=/data/bot
+RUN mkdir -p /data
 
 CMD ["python", "bot.py"]
