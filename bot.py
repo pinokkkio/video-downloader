@@ -71,6 +71,8 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s: %(message)s", level=logging.INFO
 )
 logging.getLogger("telethon").setLevel(logging.WARNING)
+# Сообщения Telethon о паузах, которые требует Telegram (FLOOD_WAIT), — в лог.
+logging.getLogger("telethon.client.users").setLevel(logging.INFO)
 log = logging.getLogger("video-bot")
 
 download_slots = asyncio.Semaphore(MAX_PARALLEL)
