@@ -19,7 +19,6 @@ from urllib.parse import unquote, urlparse
 from dotenv import load_dotenv
 from telethon import TelegramClient, events
 from telethon.errors import RPCError
-from telethon.network import ConnectionTcpObfuscated
 from telethon.tl.custom import Message
 from telethon.tl.types import (
     DocumentAttributeVideo,
@@ -338,14 +337,17 @@ async def process_url(client: TelegramClient, message: Message, url: str) -> Non
 
             size_mb = video.path.stat().st_size / 2**20
             await edit_quietly(status, f"📤 Отправляю ({size_mb:.0f} МБ)…")
-            last_edit = time.monotonic()
+            started = last_edit = time.monotonic()
 
             async def progress(sent: int, total: int) -> None:
                 nonlocal last_edit
-                if time.monotonic() - last_edit >= 5:
-                    last_edit = time.monotonic()
+                now = time.monotonic()
+                if now - last_edit >= 5:
+                    last_edit = now
+                    speed = sent / 2**20 / max(now - started, 0.001)
                     await edit_quietly(
-                        status, f"📤 Отправляю ({size_mb:.0f} МБ): {sent * 100 // total}%"
+                        status,
+                        f"📤 Отправляю ({size_mb:.0f} МБ): {sent * 100 // total}%, {speed:.1f} МБ/с",
                     )
 
             thumb = await make_thumb(video)
@@ -367,6 +369,9 @@ async def process_url(client: TelegramClient, message: Message, url: str) -> Non
                     ],
                     progress_callback=progress,
                 )
+            elapsed = time.monotonic() - started
+            log.info("Uploaded %s: %.1f MB in %.0f s (%.1f MB/s)",
+                     url, size_mb, elapsed, size_mb / max(elapsed, 0.001))
         await delete_quietly(status)
     except DownloadError as e:
         await fail(message, status, f"❌ {e}\n{url}")
@@ -382,12 +387,10 @@ async def process_url(client: TelegramClient, message: Message, url: str) -> Non
 
 async def run() -> None:
     Path(SESSION).parent.mkdir(parents=True, exist_ok=True)
-    # Обфусцированный транспорт: обычный MTProto легко распознаётся DPI
-    # и соединение сбрасывается (Connection reset by peer).
-    client = TelegramClient(
-        SESSION, API_ID, API_HASH,
-        connection=ConnectionTcpObfuscated, connection_retries=3,
-    )
+    # Обычный транспорт MTProto. Обфусцированный (ConnectionTcpObfuscated)
+    # здесь не используется: в Telethon он шифрует весь поток на чистом
+    # Python (~0,3 МБ/с), и отправка видео становится очень медленной.
+    client = TelegramClient(SESSION, API_ID, API_HASH, connection_retries=3)
     client.add_event_handler(on_message, events.NewMessage(incoming=True))
 
     log.info(
