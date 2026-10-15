@@ -2,7 +2,7 @@
 
 Скачивание идёт через yt-dlp. С Telegram бот работает напрямую по MTProto
 (Telethon), поэтому может отправлять файлы до 2 ГБ, а не 50 МБ, как через
-Bot API. Прокси из переменной PROXY используется и для yt-dlp, и для Telegram.
+Bot API.
 """
 
 import asyncio
@@ -35,8 +35,6 @@ API_HASH = os.environ.get("API_HASH", "")
 # Файл сессии Telethon (без расширения). В Docker лежит в томе data/.
 SESSION = os.environ.get("SESSION", "data/bot")
 YTDLP_CMD = os.environ.get("YTDLP_CMD", "yt-dlp")
-# YTDLP_PROXY — старое название переменной, оставлено для совместимости.
-PROXY = os.environ.get("PROXY") or os.environ.get("YTDLP_PROXY", "")
 MAX_HEIGHT = int(os.environ.get("MAX_HEIGHT", "720"))
 # Боты по MTProto могут отправлять файлы до 2000 МБ.
 MAX_FILE_MB = int(os.environ.get("MAX_FILE_MB", "2000"))
@@ -66,8 +64,6 @@ YTDLP_ERRORS = [
     (("Sign in to confirm", "login required", "Login required", "age-restricted",
       "requires authentication", "cookies"),
      "Видео доступно только после входа в аккаунт, скачать его не получится."),
-    (("Unable to connect to proxy", "ProxyError", "Tunnel connection failed"),
-     "Не удалось подключиться к прокси."),
     (("timed out", "Connection refused", "Name or service not known", "Network is unreachable"),
      "Сайт не отвечает, попробуй позже."),
 ]
@@ -80,35 +76,6 @@ log = logging.getLogger("video-bot")
 
 download_slots = asyncio.Semaphore(MAX_PARALLEL)
 START_RE = re.compile(r"^/(start|help)(@\w+)?$", re.I)
-
-
-def mask_proxy(url: str) -> str:
-    """Адрес прокси для логов — без пароля."""
-    if not url:
-        return "нет (прямое подключение)"
-    p = urlparse(url)
-    if p.password:
-        url = url.replace(f":{p.password}@", ":***@", 1)
-    return url
-
-
-def parse_proxy(url: str) -> dict | None:
-    """http://user:pass@host:port или socks5://… -> настройки прокси для Telethon."""
-    if not url:
-        return None
-    p = urlparse(url)
-    kinds = {"http": "http", "https": "http", "socks5": "socks5", "socks5h": "socks5",
-             "socks4": "socks4", "socks4a": "socks4"}
-    if p.scheme not in kinds or not p.hostname:
-        raise SystemExit(f"Не понимаю адрес прокси {url!r}: нужен http://host:port или socks5://host:port.")
-    return {
-        "proxy_type": kinds[p.scheme],
-        "addr": p.hostname,
-        "port": p.port or (1080 if p.scheme.startswith("socks") else 8080),
-        "username": unquote(p.username) if p.username else None,
-        "password": unquote(p.password) if p.password else None,
-        "rdns": True,
-    }
 
 
 class DownloadError(Exception):
@@ -207,10 +174,8 @@ async def download(url: str, height: int, workdir: Path) -> Video:
         "-o", str(workdir / "%(id)s.%(ext)s"),
         "--print", "after_move:%(filepath)s\t%(width)s\t%(height)s\t%(duration)s\t%(title)s",
     ]
-    if PROXY:
-        cmd += ["--proxy", PROXY]
     cmd.append(url)
-    log.info("Running: %s", " ".join(cmd).replace(PROXY, mask_proxy(PROXY)) if PROXY else " ".join(cmd))
+    log.info("Running: %s", " ".join(cmd))
     proc = await asyncio.create_subprocess_exec(
         *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
     )
@@ -416,26 +381,24 @@ async def process_url(client: TelegramClient, message: Message, url: str) -> Non
 
 
 async def run() -> None:
-    proxy = parse_proxy(PROXY)
     Path(SESSION).parent.mkdir(parents=True, exist_ok=True)
     # Обфусцированный транспорт: обычный MTProto легко распознаётся DPI
     # и соединение сбрасывается (Connection reset by peer).
     client = TelegramClient(
         SESSION, API_ID, API_HASH,
-        proxy=proxy, connection=ConnectionTcpObfuscated, connection_retries=3,
+        connection=ConnectionTcpObfuscated, connection_retries=3,
     )
     client.add_event_handler(on_message, events.NewMessage(incoming=True))
 
     log.info(
-        "Starting bot (yt-dlp: %s, proxy: %s, max %dp, limit %d MB)",
-        YTDLP_CMD, mask_proxy(PROXY), MAX_HEIGHT, MAX_FILE_MB,
+        "Starting bot (yt-dlp: %s, max %dp, limit %d MB)",
+        YTDLP_CMD, MAX_HEIGHT, MAX_FILE_MB,
     )
     try:
         await client.start(bot_token=BOT_TOKEN)
     except (OSError, ConnectionError) as e:
         # Без подробного traceback: контейнер перезапустится и попробует снова.
-        via = f" через прокси {mask_proxy(PROXY)}" if PROXY else " напрямую (PROXY не задан)"
-        log.error("Не удалось подключиться к Telegram%s: %s. Проверь сеть и PROXY.", via, e)
+        log.error("Не удалось подключиться к Telegram: %s. Проверь сеть.", e)
         raise SystemExit(1)
     except RPCError as e:
         log.error("Telegram отклонил вход: %s. Проверь BOT_TOKEN, API_ID и API_HASH.", e)
