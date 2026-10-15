@@ -12,20 +12,16 @@ import re
 import shutil
 import tempfile
 import time
-from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
 from dotenv import load_dotenv
-from telethon import TelegramClient, events, helpers
+from telethon import TelegramClient, events
 from telethon.errors import RPCError
-from telethon.tl.functions.upload import SaveBigFilePartRequest
 from telethon.tl.custom import Message
 from telethon.tl.types import (
-    DocumentAttributeFilename,
     DocumentAttributeVideo,
-    InputFileBig,
     MessageEntityTextUrl,
     MessageEntityUrl,
 )
@@ -43,10 +39,6 @@ MAX_HEIGHT = int(os.environ.get("MAX_HEIGHT", "720"))
 MAX_FILE_MB = int(os.environ.get("MAX_FILE_MB", "2000"))
 DOWNLOAD_TIMEOUT = int(os.environ.get("DOWNLOAD_TIMEOUT", "1800"))
 MAX_PARALLEL = int(os.environ.get("MAX_PARALLEL", "2"))
-# Сколько частей файла отправлять в Telegram одновременно.
-UPLOAD_WORKERS = int(os.environ.get("UPLOAD_WORKERS", "8"))
-UPLOAD_PART_SIZE = 512 * 1024  # максимальный размер части в MTProto
-BIG_FILE_SIZE = 10 * 1024 * 1024  # файлы больше этого грузятся через SaveBigFilePart
 ALLOWED_USERS = {
     int(x) for x in re.split(r"[,\s]+", os.environ.get("ALLOWED_USERS", "")) if x
 }
@@ -244,53 +236,6 @@ async def make_thumb(video: Video) -> Path | None:
     return thumb if proc.returncode == 0 and thumb.exists() else None
 
 
-async def upload_parallel(
-    client: TelegramClient, path: Path, progress: Callable[[int, int], Awaitable[None]]
-):
-    """Загружает файл в Telegram, отправляя несколько частей одновременно.
-
-    Telethon шлёт части строго по очереди и ждёт подтверждения каждой, поэтому
-    скорость упирается в задержку до сервера. Параллельная отправка это обходит.
-    """
-    size = path.stat().st_size
-    if size <= BIG_FILE_SIZE or UPLOAD_WORKERS <= 1:
-        # Маленькие файлы Telegram принимает только обычным способом (с md5).
-        return await client.upload_file(str(path), progress_callback=progress)
-
-    parts = (size + UPLOAD_PART_SIZE - 1) // UPLOAD_PART_SIZE
-    file_id = helpers.generate_random_long()
-    next_part = 0
-    sent = 0
-
-    async def worker() -> None:
-        nonlocal next_part, sent
-        with path.open("rb") as f:
-            while next_part < parts:
-                index = next_part
-                next_part += 1
-                f.seek(index * UPLOAD_PART_SIZE)
-                data = f.read(UPLOAD_PART_SIZE)
-                for attempt in range(3):
-                    # FLOOD_WAIT и обрывы связи Telethon обрабатывает сам;
-                    # здесь — на случай, если сервер не принял часть.
-                    if await client(SaveBigFilePartRequest(file_id, index, parts, data)):
-                        break
-                    await asyncio.sleep(1 + attempt)
-                else:
-                    raise RuntimeError(f"Telegram не принял часть {index} файла")
-                sent += len(data)
-                await progress(sent, size)
-
-    try:
-        async with asyncio.TaskGroup() as group:
-            for _ in range(min(UPLOAD_WORKERS, parts)):
-                group.create_task(worker())
-    except ExceptionGroup as eg:
-        # Наружу — исходная ошибка, чтобы её поймали обычные обработчики.
-        raise eg.exceptions[0] from None
-    return InputFileBig(file_id, parts, path.name)
-
-
 async def reply(message: Message, text: str) -> Message:
     """Ответ именно на сообщение пользователя (с цитатой)."""
     return await message.reply(text, link_preview=False)
@@ -407,11 +352,9 @@ async def process_url(client: TelegramClient, message: Message, url: str) -> Non
 
             thumb = await make_thumb(video)
             async with client.action(message.chat_id, "video"):
-                uploaded = await upload_parallel(client, video.path, progress)
                 await client.send_file(
                     message.chat_id,
-                    uploaded,
-                    mime_type="video/mp4",
+                    str(video.path),
                     caption=video.title[:1024] or None,
                     reply_to=message.id,
                     thumb=str(thumb) if thumb else None,
@@ -422,9 +365,9 @@ async def process_url(client: TelegramClient, message: Message, url: str) -> Non
                             w=video.width or 0,
                             h=video.height or 0,
                             supports_streaming=True,
-                        ),
-                        DocumentAttributeFilename(video.path.name),
+                        )
                     ],
+                    progress_callback=progress,
                 )
             elapsed = time.monotonic() - started
             log.info("Uploaded %s: %.1f MB in %.0f s (%.1f MB/s)",
