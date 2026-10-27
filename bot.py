@@ -75,6 +75,106 @@ logging.getLogger("telethon").setLevel(logging.WARNING)
 logging.getLogger("telethon.client.users").setLevel(logging.INFO)
 log = logging.getLogger("video-bot")
 
+
+def message_author(sender, sender_id: int | None) -> str:
+    """Имя отправителя: id, @username и отображаемое имя."""
+    if sender is None:
+        return f"id={sender_id}"
+    name = " ".join(
+        part
+        for part in (
+            getattr(sender, "first_name", None),
+            getattr(sender, "last_name", None),
+        )
+        if part
+    ).strip()
+    username = getattr(sender, "username", None)
+    title = getattr(sender, "title", None)
+    parts = [f"id={getattr(sender, 'id', sender_id)}"]
+    if username:
+        parts.append(f"@{username}")
+    if name:
+        parts.append(name)
+    elif title:
+        parts.append(title)
+    return " ".join(parts)
+
+
+def chat_label(chat, chat_id, is_private: bool) -> str:
+    if is_private:
+        label = "private"
+    else:
+        label = getattr(chat, "title", None) or "chat"
+    username = getattr(chat, "username", None) if chat is not None and not is_private else None
+    if username:
+        label = f"{label} @{username}"
+    return f"{label} id={chat_id}"
+
+
+def message_body(message: Message) -> str:
+    """Текст сообщения одной строкой и тип вложения, если текста нет или он не один."""
+    text = (message.message or "").replace("\r\n", "\n").replace("\n", "\\n")
+    kinds = []
+    if message.fwd_from:
+        kinds.append("forward")
+    if message.sticker:
+        kinds.append("sticker")
+    elif getattr(message, "video_note", None):
+        kinds.append("video_note")
+    elif message.video:
+        kinds.append("video")
+    elif message.voice:
+        kinds.append("voice")
+    elif message.audio:
+        kinds.append("audio")
+    elif message.gif:
+        kinds.append("gif")
+    elif message.photo:
+        kinds.append("photo")
+    elif message.document:
+        kinds.append("document")
+    elif message.contact:
+        kinds.append("contact")
+    elif message.geo or message.venue:
+        kinds.append("location")
+    elif message.poll:
+        kinds.append("poll")
+    elif message.media:
+        kinds.append(type(message.media).__name__)
+    body = text
+    if kinds:
+        attachment = "[" + ", ".join(kinds) + "]"
+        body = f"{text} {attachment}".strip() if text else attachment
+    if not body:
+        body = "[пустое сообщение]"
+    return body
+
+
+async def log_incoming(event: events.NewMessage.Event, message: Message) -> None:
+    """Кто, что и когда написал боту. Та же запись, что и остальные логи бота."""
+    try:
+        sender = await event.get_sender()
+    except RPCError:
+        sender = None
+    try:
+        chat = await event.get_chat()
+    except RPCError:
+        chat = None
+    when = (
+        message.date.isoformat(sep=" ", timespec="seconds")
+        if message.date
+        else "unknown"
+    )
+    log.info(
+        "Incoming msg_id=%s at %s from %s in %s: %s",
+        message.id,
+        when,
+        message_author(sender, event.sender_id),
+        chat_label(chat, message.chat_id, event.is_private),
+        message_body(message),
+    )
+
+
 download_slots = asyncio.Semaphore(MAX_PARALLEL)
 START_RE = re.compile(r"^/(start|help)(@\w+)?$", re.I)
 
@@ -268,6 +368,7 @@ async def fail(message: Message, status: Message, text: str) -> None:
 
 async def on_message(event: events.NewMessage.Event) -> None:
     message: Message = event.message
+    await log_incoming(event, message)
     if ALLOWED_USERS and event.sender_id not in ALLOWED_USERS:
         log.info("Rejected user %s", event.sender_id)
         return
